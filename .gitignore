@@ -43,4 +43,4 @@ _deps
 *.exe
 *.out
 *.app
-MosquittoServer
+Server

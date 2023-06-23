@@ -44,3 +44,7 @@ _deps
 *.out
 *.app
 Server
+
+# Others
+build/
+.vscode/

@@ -5,6 +5,8 @@
 #include <plog/Appenders/ColorConsoleAppender.h>
 #include <thread>
 #include <chrono>
+#include <cstring> // for strcmp
+#include <condition_variable>
 
 class MqttServer
 {
@@ -18,7 +20,7 @@ public:
 
         // Initialize mosquitto library
         mosquitto_lib_init();
-        mosq = mosquitto_new(id, true, nullptr);
+        mosq = mosquitto_new(id, true, this); // Passing this as userdata
         if (!mosq)
         {
             LOG_ERROR << "Can't initialize Mosquitto library";
@@ -26,7 +28,7 @@ public:
         }
 
         // Set up callbacks
-        mosquitto_message_callback_set(mosq, onMessage);
+        mosquitto_message_callback_set(mosq, MqttServer::onMessageWrapper);
 
         // Connect to the broker
         int ret = mosquitto_connect(mosq, host, port, keepalive);
@@ -35,10 +37,20 @@ public:
             LOG_ERROR << "Can't connect to Mosquitto server";
             exit(1);
         }
+
+        isRunning = true;
+
+        LOG_INFO << "Connected to Mosquitto server. Listening to topic: mqtt/test ... " << std::endl
+                 << "Send 'exit' to stop the server.";
     }
 
     ~MqttServer()
     {
+        if (isRunning)
+        {
+            stop();
+        }
+
         mosquitto_destroy(mosq);
         mosquitto_lib_cleanup();
     }
@@ -53,18 +65,52 @@ public:
         mosquitto_loop_start(mosq);
     }
 
+    void stop()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            isRunning = false;
+        }
+        cv.notify_one();
+        mosquitto_disconnect(mosq);
+        mosquitto_loop_stop(mosq, true); // non-blocking call
+    }
+
+    bool is_running() { return isRunning; }
+
+    void wait_until_stopped()
+    {
+        std::unique_lock<std::mutex> lock(mtx);
+        cv.wait(lock, [this]
+                { return !this->isRunning; });
+    }
+
 private:
     const char *id;
     const char *host;
+    bool isRunning; // Used to stop the loop
     int port;
     int keepalive = 60;
     struct mosquitto *mosq;
 
-    static void onMessage(struct mosquitto *mosq, void *obj, const struct mosquitto_message *message)
+    std::mutex mtx;
+    std::condition_variable cv;
+
+    static void onMessageWrapper(struct mosquitto *mosq, void *obj, const struct mosquitto_message *message)
+    {
+        static_cast<MqttServer *>(obj)->onMessage(mosq, message);
+    }
+
+    void onMessage(struct mosquitto *mosq, const struct mosquitto_message *message)
     {
         if (message)
         {
             LOG_INFO << "Received message: " << static_cast<char *>(message->payload);
+            if (strcmp(static_cast<char *>(message->payload), "exit") == 0)
+            {
+                LOG_INFO << "Exiting ...";
+                stop();
+            }
         }
     }
 };
@@ -75,8 +121,7 @@ int main()
     server.subscribe("mqtt/test");
     server.loop();
 
-    // We will run for a short period of time, to demonstrate
-    std::this_thread::sleep_for(std::chrono::seconds(10));
+    server.wait_until_stopped();
 
     return 0;
 }
